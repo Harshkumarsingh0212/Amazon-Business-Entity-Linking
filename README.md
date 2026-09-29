@@ -1,41 +1,70 @@
 # Amazon Business Entity Resolution
 
-This pipeline matches business records across three noisy sources for **ML Challenge 2026 – Business Entity Resolution**. For every Source 1 business it finds all records in Source 2 and Source 3 that describe the same business. The records come from three countries (US, India, and France, which appears only in the test set), are written in several scripts, and are full of typos.
+Matching the same business across three messy data sources, at scale, on a laptop-class machine.
 
-**Public leaderboard: 0.96 macro F0.5, rank 341 of 9,000+ teams** (final model v3.2). The Kaggle run is [here](https://www.kaggle.com/code/tanweerahmad04/notebook02e3b90c22/notebook).
+![macro F0.5](https://img.shields.io/badge/macro%20F0.5-0.96-brightgreen)
+![leaderboard](https://img.shields.io/badge/leaderboard-rank%20341%20%2F%209%2C000%2B-blue)
+![hardware](https://img.shields.io/badge/hardware-CPU%20only-lightgrey)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
 
-| | |
+Business records are rarely clean. The same company might appear as `राम मार्केटिंग प्राइवेट लिमिटेड` in one file, `Ram Marketing Pvt Ltd` in another, and with a completely different address in a third. This project takes three such sources and, for every business in the first, finds every record in the other two that describes the same company.
+
+It was built for **ML Challenge 2026 – Business Entity Resolution** and scored **0.96 macro F0.5 on the public leaderboard, ranking 341 out of 9,000+ teams** with the final model (v3.2). The full Kaggle run is [here](https://www.kaggle.com/code/harshkumarsingh01/amazon-business-entity-linking).
+
+| At a glance | |
 |---|---|
-| Test entities matched | 1,732,544 Source 1 businesses against 9.97M Source 2/3 records |
-| Candidate pairs scored | 92.1M, after blocking, from ~2.3×10¹³ possible pairs |
+| Entities matched | 1,732,544 Source 1 businesses against 9.97M Source 2/3 records |
+| Candidate pairs scored | 92.1M, after blocking — down from ~2.3 × 10¹³ possible pairs |
 | Predicted links | 5.34M (3.08 per business; 7.0% left unmatched) |
-| Holdout (20k unseen businesses) | F0.5 **0.954** · precision 0.980 · recall 0.898 |
+| Holdout accuracy (20k unseen businesses) | F0.5 **0.954** · precision 0.980 · recall 0.898 |
 | Runtime | ~3 h on a 4-CPU Kaggle machine, no GPU |
+
+---
+
+## Contents
+
+- [The problem](#the-problem)
+- [What the data told us](#what-the-data-told-us)
+- [How it works](#how-it-works)
+- [Results](#results)
+- [Version history](#version-history)
+- [Repository layout](#repository-layout)
+- [Running it yourself](#running-it-yourself)
+- [Limitations and next steps](#limitations-and-next-steps)
+- [License](#license)
 
 ---
 
 ## The problem
 
-- **Input.** Three tab-separated files with `entity_id`, `business_name`, `business_address` and `country`.
-  - Train: 2.2M Source 1 records against 10.3M Source 2/3 records, with ground truth.
-  - Test: 1.73M Source 1 records against 9.97M Source 2/3 records.
-- **Task.** For each Source 1 entity, output every matching Source 2/3 id. There can be none, one, or many (at most 11 in training).
-- **Metric.** Macro F0.5 per Source 1 entity, so precision counts twice as much as recall.
-  - An entity with no true match (a *singleton*) scores 1 only if the prediction is empty.
-- **What makes it hard:**
-  - Names appear in Devanagari as well as Latin script (`राम मार्केटिंग प्राइवेट लिमिटेड` ↔ `Ram Marketing Pvt Ltd`).
-  - Typos (`COIMATORE`), junk prefixes (`-- `, `<< `), domains used as names, and many forms of legal suffix.
-  - Addresses are reordered, abbreviated or missing, and house numbers have dropped digits.
-  - The test data adds **France**, a country never seen in training, making up 15% of the test set.
-  - The test pool is **23% denser** than the training pool: 5.75 vs 4.68 Source 2/3 records per Source 1 record, so there are more distractors.
+**The input** is three tab-separated files, each with `entity_id`, `business_name`, `business_address`, and `country`.
 
-Findings from data exploration that shaped the design (details in [`docs/running_log.md`](docs/running_log.md)):
-- Every match is **within one country**, with 0 cross-country links in 153k sampled pairs, so country is a safe hard partition.
-- Matching is strictly **many-to-one**: each Source 2/3 record belongs to at most one Source 1 entity.
-- 5.58% of Source 1 entities are singletons; the rest have 3.46 matches on average.
-- A shared address token covers 95.6% of true pairs and a shared name token 85.8%. Postal codes cover only 5%, so they are useless for blocking.
+- **Train:** 2.2M Source 1 records against 10.3M Source 2/3 records, with ground-truth labels.
+- **Test:** 1.73M Source 1 records against 9.97M Source 2/3 records, with no labels.
 
-## Pipeline
+**The task** is to output, for each Source 1 entity, every matching Source 2/3 id. A business can have no match, one match, or many — up to 11 in the training data.
+
+**The metric** is macro F0.5 per Source 1 entity, which weights precision twice as heavily as recall. A business with no true match (a *singleton*) only scores a perfect 1 if you predict nothing for it, so guessing is punished.
+
+**What makes it hard:**
+
+- Names appear in Devanagari as well as Latin script (`राम मार्केटिंग प्राइवेट लिमिटेड` ↔ `Ram Marketing Pvt Ltd`).
+- Text is noisy in every way imaginable: typos (`COIMATORE`), junk prefixes (`-- `, `<< `), domains used as names, and dozens of legal-suffix variants.
+- Addresses get reordered, abbreviated, or dropped entirely, and house numbers lose digits.
+- The test set introduces **France** — a country that never appears in training and makes up 15% of the test data.
+- The test pool is **23% denser** than training (5.75 vs 4.68 Source 2/3 records per Source 1 record), so there are more near-duplicates to trip over.
+
+## What the data told us
+
+A few findings from exploration shaped almost every design decision that followed. The full trail is in [`docs/running_log.md`](docs/running_log.md).
+
+- **Matches never cross borders.** Across 153k sampled pairs, not one linked businesses in different countries, so splitting the problem by country is completely safe.
+- **The relationship is strictly many-to-one.** Each Source 2/3 record belongs to at most one Source 1 entity, which turns final assignment into a clean tie-break.
+- **Most businesses do have matches.** Only 5.58% are singletons; the rest average 3.46 matches each.
+- **Names and addresses are the signal; postal codes are not.** A shared address token covers 95.6% of true pairs and a shared name token 85.8%, but postal codes cover just 5% — useless for narrowing the search.
+
+## How it works
 
 ```mermaid
 flowchart LR
@@ -48,55 +77,73 @@ flowchart LR
     G --> H[matching_results.tsv<br/>candidate_pairs.tsv]
 ```
 
-1. **Preprocessing.** Raw text is never overwritten; each field gets several derived views:
-   - original script (NFC);
-   - Latin transliteration and accent folding;
-   - *core* name without legal suffixes, plus a *compact* (spaceless) name;
-   - legal form, aliases (`d/b/a`), initials;
-   - house number, postal code, unit, number of address components;
-   - flags for missing addresses and mixed scripts.
+### 1. Preprocessing — keep everything, derive many views
 
-   Four optional rules were each tested against validation F0.5 and none was adopted, because none improved it by more than noise (table in `results/switch_gate.csv`): encoding repair, placeholder removal, state expansion, street abbreviations. A fifth candidate, a different Devanagari transliteration scheme, also stayed off.
-2. **Blocking, per country.**
-   - TF-IDF vectors for name and address, scored by cosine similarity (normalised on the candidate side) and blended 50/50.
-   - Keep the top 50 plus a name-only top 10. The name-only channel rescues records with empty or garbled addresses.
-   - Tokens that appear in more than 0.5% of a country's pool are not used as blocking keys.
-   - Implemented with `sparse_dot_topn`. On the full pool this keeps 94% of true pairs with about 53 candidates per entity.
-3. **Features.** 55 per candidate pair:
-   - rapidfuzz scores (ratio, token set/sort, partial, Jaro–Winkler) on several name and address views;
-   - legal-form agreement or conflict; alias and initials matches;
-   - number, postal and unit agreement;
-   - script flags and token counts;
-   - **house-number features**: equal, absolute and relative difference, digit edit distance, truncation;
-   - blocking score, rank and gaps to the best candidate.
-4. **Matcher.**
-   - LightGBM (binary, 127 leaves, learning rate 0.08, up to 1,000 rounds with early stopping).
-   - Trained on 10.6M candidate pairs from 200k training entities.
-   - **Density matching:** training entities retrieve candidates from a pool with extra distractor records added, sampled from the test Source 2/3 records. Their ids are disjoint from training, so they are guaranteed non-matches. This brings training density up to the test density: +1.01M records for India, +1.43M for the US.
-5. **Decision.**
-   - Accept pairs with probability ≥ 0.75. The threshold is tuned for F0.5 on validation and checked on an untouched holdout.
-   - Each Source 2/3 record goes to at most one Source 1 entity: the one with the highest probability.
-   - At most 15 matches per entity.
-   - Country is never a model feature, so France and any unseen label are handled the same way.
+Raw text is never overwritten. Instead, each field is expanded into several derived views so the model can compare records at different levels of strictness:
+
+- original script (NFC), preserving Devanagari and accents;
+- a Latin transliteration with accents folded;
+- a *core* name with legal suffixes stripped, and a *compact* (spaceless) variant;
+- legal form, aliases (`d/b/a`), and initials;
+- house number, postal code, unit, and the number of address components;
+- flags for missing addresses and mixed scripts.
+
+Four optional cleanup rules were each tested against validation F0.5 and **none earned its place** — encoding repair, placeholder removal, state expansion, and street abbreviations all moved the score by less than noise (see [`results/switch_gate.csv`](results/switch_gate.csv)). A fifth candidate, an alternative Devanagari transliteration scheme, was also left off.
+
+### 2. Blocking — shrink 23 trillion pairs to 92 million
+
+Comparing every pair is impossible, so blocking picks a shortlist of candidates per entity, working within each country:
+
+- TF-IDF vectors for name and address, scored by cosine similarity (normalised on the candidate side) and blended 50/50.
+- Keep the top 50, plus a name-only top 10. That second channel is what rescues records with empty or garbled addresses.
+- Tokens appearing in more than 0.5% of a country's pool are dropped as blocking keys — they're too common to be discriminating.
+
+Implemented with `sparse_dot_topn`, this keeps **94% of all true pairs** while surfacing only about 53 candidates per entity.
+
+### 3. Features — 55 signals per candidate pair
+
+Each surviving pair is described by 55 features:
+
+- rapidfuzz string scores (ratio, token set/sort, partial, Jaro–Winkler) across several name and address views;
+- legal-form agreement or conflict; alias and initials matches;
+- number, postal, and unit agreement;
+- script flags and token counts;
+- **house-number features** — equality, absolute and relative difference, digit edit distance, and truncation;
+- the blocking score, rank, and gaps to the best candidate.
+
+### 4. Matcher — LightGBM trained at test-like density
+
+A binary LightGBM classifier (127 leaves, learning rate 0.08, up to 1,000 rounds with early stopping) is trained on 10.6M candidate pairs drawn from 200k training entities.
+
+The key trick is **density matching**. Since the test pool is denser than training, a model trained on the sparser training pool would see too few distractors and grow overconfident. To fix this, extra records sampled from the *test* Source 2/3 files are folded into the training pool — their ids are disjoint from training, so they're guaranteed non-matches. This lifts training density up to test density (+1.01M records for India, +1.43M for the US) without leaking any labels.
+
+### 5. Decision — precision first
+
+- Accept pairs with probability ≥ 0.75, a threshold tuned for F0.5 on validation and confirmed on an untouched holdout.
+- Enforce the many-to-one rule: each Source 2/3 record goes to whichever Source 1 entity scored it highest.
+- Cap each entity at 15 matches.
+- **Country is never a model feature**, so France — and any other unseen label — flows through the exact same logic as everything else.
 
 ## Results
 
-**Validation.** All on 20k Source 1 entities. The holdout was never used for any choice (`results/validation_metrics.csv`).
+All validation figures below are on 20k Source 1 entities. The holdout was quarantined from every design choice ([`results/validation_metrics.csv`](results/validation_metrics.csv)).
 
-| Evaluation | F0.5 | India | US | Precision | Recall | Singleton accuracy |
+| Evaluation | F0.5 | India | US | Precision | Recall | Singleton acc. |
 |---|--:|--:|--:|--:|--:|--:|
 | Mini-world (small pool) | 0.976 | 0.966 | 0.983 | 0.988 | 0.951 | 0.970 |
-| Full pool, test-like density: validation | 0.953 | 0.935 | 0.964 | 0.978 | 0.898 | 0.943 |
-| Full pool, test-like density: **holdout** | **0.954** | 0.933 | 0.968 | 0.980 | 0.898 | 0.957 |
+| Full pool, test-like density — validation | 0.953 | 0.935 | 0.964 | 0.978 | 0.898 | 0.943 |
+| Full pool, test-like density — **holdout** | **0.954** | 0.933 | 0.968 | 0.980 | 0.898 | 0.957 |
 
-- The holdout F0.5 curve is flat between 0.70 and 0.80 (0.954 → 0.953), so the threshold choice is robust (`results/holdout_threshold_curve.csv`).
-- Blocking on the full pool keeps 94.0% of true pairs. A perfect matcher on these candidates would score 0.977, so blocking costs about 0.023 of F0.5 and the matcher about 0.025.
-- Leave-one-country-out, a proxy for unseen France: training on the US and scoring India gives 0.926 instead of 0.966; India to US gives 0.969 instead of 0.983 (`results/leave_one_country_out.csv`).
-- The most important features by gain are `rank` (56%), `num_tset`, `n_compact_ratio`, `blk`, `a_tset`, `n_latin_ratio` and `n_core_partial`, plus the house-number features `hn_absdiff`, `hn_eq` and `hn_trunc` (`results/feature_importance_gain.csv`).
+A few things worth calling out:
 
-**Test set** (`results/test_per_country.csv`):
+- **The threshold choice is robust.** The holdout F0.5 curve is essentially flat between 0.70 and 0.80 (0.954 → 0.953), so we aren't balanced on a knife's edge ([`results/holdout_threshold_curve.csv`](results/holdout_threshold_curve.csv)).
+- **We know where the ceiling is.** Blocking keeps 94.0% of true pairs, and a perfect matcher on those candidates would score 0.977. So blocking costs about 0.023 of F0.5 and the matcher about 0.025 — a balanced error budget.
+- **Transfer to unseen countries holds up.** Leave-one-country-out (a stand-in for France) drops US→India to 0.926 from 0.966, and India→US to 0.969 from 0.983 ([`results/leave_one_country_out.csv`](results/leave_one_country_out.csv)).
+- **One feature dominates.** By gain, the top features are `rank` (56%), `num_tset`, `n_compact_ratio`, `blk`, `a_tset`, `n_latin_ratio`, and `n_core_partial`, along with the house-number features `hn_absdiff`, `hn_eq`, and `hn_trunc` ([`results/feature_importance_gain.csv`](results/feature_importance_gain.csv)).
 
-| Country | Test entities | Source 2/3 pool | Candidate pairs | Matches per entity | Minutes |
+**On the full test set** ([`results/test_per_country.csv`](results/test_per_country.csv)):
+
+| Country | Test entities | Source 2/3 pool | Candidate pairs | Matches / entity | Minutes |
 |---|--:|--:|--:|--:|--:|
 | France | 259,452 | 1,434,993 | 14.0M | 2.90 | 15 |
 | India | 809,986 | 4,717,565 | 44.0M | 3.04 | 72 |
@@ -106,51 +153,52 @@ The official validator passed.
 
 ## Version history
 
-The notebooks are in [`experiments/`](experiments/README.md).
+The notebooks for each stage live in [`experiments/`](experiments/README.md).
 
 | Version | Change | Public LB |
 |---|---|--:|
 | v2 | Multi-view preprocessing, TF-IDF blocking, 49 features, LightGBM | 0.933 |
 | v3 | + density matching, house-number features, 4 name/address frequency features, 200k training entities | 0.929 |
-| v3.1 | Country treated as an open set of labels (no hard-coded US/India); same predictions as v3 | — |
+| v3.1 | Country treated as an open set of labels (no hard-coded US/India); predictions unchanged from v3 | — |
 | **v3.2** | **Frequency features removed** (55 features) | **0.96** |
 
-**Why v3 dropped and v3.2 recovered.** The frequency features counted how common a name or address is *per 100k records* of the population being scored. The test population is 2–5× smaller than the training population (US: 663k vs 1.32M entities), so on the test set every name looked much more common than in training. The holdout could not detect this because it comes from the training population. Removing those features kept the gains from density matching and the house-number features.
+### The v3 mystery — and how removing features won
+
+v3 added several improvements yet *dropped* on the leaderboard, which was the most instructive moment of the project.
+
+The culprit was a set of four frequency features that counted how common a name or address was, expressed *per 100k records of the population being scored*. That framing quietly broke on the test set: the test population is 2–5× smaller than training (US alone is 663k entities versus 1.32M in training), so the same name looked far more common on test than it ever did in training. The features were being fed systematically shifted inputs.
+
+The reason this went undetected for a while is subtle — the holdout is drawn from the *training* population, so it experienced the exact same distribution as training and couldn't reveal the mismatch. Removing those four features (v3.2) kept every genuine gain from density matching and the house-number features, and the score jumped to 0.96.
 
 ## Repository layout
 
 ```
-notebooks/er_pipeline_v3_2.ipynb   final pipeline (Colab or Kaggle), the run that scored 0.96
-src/er_pipeline_v3_2.py            plain-Python export of the notebook for reading on GitHub
+notebooks/er_pipeline_v3_2.ipynb   final pipeline (Colab or Kaggle) — the run that scored 0.96
+src/er_pipeline_v3_2.py            plain-Python export of the notebook, for reading on GitHub
 models/matcher_lgb.txt             trained LightGBM matcher (55 features; see models/README.md)
-results/                           results_v3_2.json (full run log) + CSV tables used above
+results/                           results_v3_2.json (full run log) + the CSV tables cited above
 experiments/                       v2, v3 (+ its results.json and a re-threshold cell), v3.1
-docs/running_log.md                analysis log: exploration → design decisions → every run and its interpretation
+docs/running_log.md                the analysis log: exploration → design decisions → every run and its reading
 docs/EDA_Report_Business_Entity_Resolution.docx
 ```
 
-## How to run
+## Running it yourself
 
-1. Get the challenge data from the organisers. **The competition data is not included here.**
-2. Build the *mini-world* folder (`train/` and `val/` Source 1, a shared Source 2/3 pool, ground truth, and `splits_v1.tsv`). This is the fast-iteration and validation split described in `docs/running_log.md` (Part 3).
-3. On Kaggle:
-   - attach the challenge folder and the mini-world as Datasets;
-   - turn Internet on (for `pip install`);
-   - use **Save & Run All**.
+The competition data is **not** included here — you'll need it from the organisers first.
 
-   On Colab, paste the two Drive folder links into the config cell instead.
-4. Phase A (mini-world) takes about 7 minutes. Phase B trains the final model (about 33 minutes), then scores the test set per country (about 2.4 hours) and writes `matching_results.tsv`, `candidate_pairs.tsv`, `results.json` and one file per extra threshold.
+1. Get the challenge data from the organisers.
+2. Build the *mini-world* folder: `train/` and `val/` Source 1 files, a shared Source 2/3 pool, ground truth, and `splits_v1.tsv`. This is the fast-iteration and validation split described in [`docs/running_log.md`](docs/running_log.md) (Part 3).
+3. **On Kaggle:** attach the challenge folder and the mini-world as Datasets, turn Internet on (for `pip install`), and use **Save & Run All**. **On Colab:** paste the two Drive folder links into the config cell instead.
+4. Phase A (mini-world) takes about 7 minutes. Phase B trains the final model (~33 minutes), scores the test set country by country (~2.4 hours), and writes `matching_results.tsv`, `candidate_pairs.tsv`, `results.json`, and one file per extra threshold.
 
-Requirements: Python 3.10+, `pandas`, `pyarrow`, `numpy`, `scipy`, `scikit-learn`, `lightgbm`, `rapidfuzz`, `sparse_dot_topn`, `unidecode`, `indic-transliteration`, `ftfy` (see `requirements.txt`). CPU only.
+**Requirements:** Python 3.10+, plus `pandas`, `pyarrow`, `numpy`, `scipy`, `scikit-learn`, `lightgbm`, `rapidfuzz`, `sparse_dot_topn`, `unidecode`, `indic-transliteration`, and `ftfy` (see [`requirements.txt`](requirements.txt)). CPU only — no GPU needed.
 
 ## Limitations and next steps
 
-- **Recall is the weaker side** (0.90 against 0.98 precision). The main misses are:
-  - true matches whose address is empty and whose name differs (a DBA name, or a translation into another script);
-  - house numbers with dropped digits that the model still rejects.
-- **Cross-script names** (Devanagari ↔ Latin) remain the largest known gap. A learned transliteration model or a small multilingual character model is the next lever.
-- France has no labels. Its behaviour is estimated only through leave-one-country-out; its prediction profile (2.90 matches per entity) is close to US (3.21) and India (3.04).
+- **Recall is the weaker side** (0.90 against 0.98 precision). The two most common misses are true matches whose address is empty *and* whose name differs (a DBA name, or a translation into another script), and house numbers with dropped digits that the model still rejects.
+- **Cross-script names** (Devanagari ↔ Latin) are the largest known gap. A learned transliteration model, or a small multilingual character model, is the most promising next lever.
+- **France remains a blind spot.** With no labels, its behaviour is only estimated through leave-one-country-out — though its prediction profile (2.90 matches per entity) sits comfortably between the US (3.21) and India (3.04), which is reassuring.
 
 ## License
 
-MIT for the code in this repository (see `LICENSE`). The challenge data belongs to the competition organisers and is not redistributed.
+The code in this repository is released under the [MIT License](LICENSE). The challenge data belongs to the competition organisers and is not redistributed here.
